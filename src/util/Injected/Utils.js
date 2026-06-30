@@ -1106,60 +1106,205 @@ exports.LoadUtils = () => {
     };
 
     /**
+     * Reads the already-resolved blob for a message from WA's caches.
+     * Returns null if neither the in-memory blob cache nor the media
+     * object hold usable bytes.
+     * @param {Object} msg
+     * @returns {Blob|null}
+     */
+    window.WWebJS.getResolvedMediaBlob = (msg) => {
+        const cached = window
+            .require('WAWebMediaInMemoryBlobCache')
+            .InMemoryMediaBlobCache.get(msg.mediaObject?.filehash);
+        if (cached) return cached;
+
+        if (msg.mediaObject?.mediaBlob) {
+            try {
+                // forceToBlob() throws if the OpaqueData was already released.
+                return msg.mediaObject.mediaBlob.forceToBlob();
+            } catch (ignoredError) {
+                return null;
+            }
+        }
+        return null;
+    };
+
+    /**
+     * Last-resort download path: decrypt straight from the CDN using the
+     * media metadata still carried on the message, bypassing WA's stateful
+     * download machine and the in-memory cache. Mirrors the pre-refactor
+     * behaviour and recovers media that the state machine has parked in a
+     * dead-end stage (NEED_POKE / ERROR_MISSING) while the message still has
+     * a valid directPath + mediaKey + encFilehash.
+     * @param {Object} msg
+     * @returns {Promise<Blob|null>}
+     */
+    window.WWebJS.directDownloadMedia = async (msg) => {
+        const directPath = msg.directPath;
+        const mediaKey = msg.mediaKey;
+        const encFilehash = msg.encFilehash;
+        // Without these the server has nothing to serve / decrypt.
+        if (!directPath || !mediaKey || !encFilehash) return null;
+
+        let mediaType;
+        try {
+            mediaType = window
+                .require('WAWebMmsMediaTypes')
+                .getMsgMediaType(msg);
+        } catch (ignoredError) {
+            mediaType = msg.mediaObject?.type;
+        }
+        if (!mediaType) return null;
+
+        const qpl = window
+            .require('WAWebStartMediaDownloadQpl')
+            .startMediaDownloadQpl({ entryPoint: 'MediaDownload' });
+
+        try {
+            const buffer = await window
+                .require('WAWebDownloadManager')
+                .downloadManager.downloadAndMaybeDecrypt({
+                    directPath,
+                    encFilehash,
+                    filehash: msg.filehash,
+                    mediaKey,
+                    mediaKeyTimestamp: msg.mediaKeyTimestamp,
+                    staticUrl: msg.staticUrl,
+                    type: mediaType,
+                    mimetype: msg.mimetype,
+                    signal: new AbortController().signal,
+                    downloadQpl: qpl,
+                });
+            qpl.endSuccess();
+            const mimetype =
+                msg.mimetype ||
+                window
+                    .require('WAWebMimeTypes')
+                    .getMediaMimeType(mediaType, new Uint8Array(buffer));
+            return new Blob([buffer], { type: mimetype });
+        } catch (err) {
+            qpl.endFailWithError('download_failed', err?.message);
+            return null;
+        }
+    };
+
+    /**
      * Resolves the media blob and metadata for a message.
      * Shared by downloadMedia and downloadMediaStream.
+     *
+     * Robustness notes (why this is a retry loop and not a single call):
+     *  - WA's download state machine has terminal/dead-end stages. Once
+     *    `mediaObject.downloadStage === ERROR_MISSING`, `msg.downloadMedia()`
+     *    returns immediately without doing anything (guard in
+     *    WAWebMediaMmsV4Download), so naive app-level retries are no-ops and
+     *    the media never downloads "even after retries". We reset the stage
+     *    (`clearBlob({ reset: true })` -> INIT) before retrying so a fresh RMR
+     *    is actually issued to the phone.
+     *  - The RMR ("retry media request") has no internal timeout: it waits on
+     *    an inbound MediaRetryNotification from the phone. If the phone is
+     *    offline / the notification is lost, `downloadMedia()` hangs forever,
+     *    so each attempt is wrapped in a timeout (and the in-flight download is
+     *    cancelled on timeout).
+     *  - If the state machine still fails but the message carries valid media
+     *    metadata, we fall back to a direct CDN download+decrypt.
+     *
      * @param {string} msgId
+     * @param {Object} [options]
+     * @param {number} [options.maxAttempts=3]
+     * @param {number} [options.attemptTimeoutMs=60000]
      * @returns {Promise<{blob: Blob, mimetype: string, filename: string, filesize: number}|null>}
      */
-    window.WWebJS.resolveMediaBlob = async (msgId) => {
+    window.WWebJS.resolveMediaBlob = async (
+        msgId,
+        { maxAttempts = 3, attemptTimeoutMs = 60000 } = {},
+    ) => {
         const { Msg } = window.require('WAWebCollections');
         const msg =
             Msg.get(msgId) ||
             (await Msg.getMessagesById([msgId]))?.messages?.[0];
 
-        if (
-            !msg ||
-            !msg.mediaData ||
-            msg.mediaData.mediaStage === 'REUPLOADING'
-        ) {
-            return null;
-        }
+        if (!msg || !msg.mediaData) return null;
 
-        // Always call internal downloadMedia - never skip based on
-        // mediaStage, because cache eviction can leave stage=RESOLVED
-        // with empty InMemoryMediaBlobCache.
-        await msg.downloadMedia({
-            downloadEvenIfExpensive: true,
-            rmrReason: 1,
-            isUserInitiated: true,
-        });
+        const { DownloadStage } = window.require('WAWebMediaTypes');
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-        if (
-            msg.mediaData.mediaStage.includes('ERROR') ||
-            msg.mediaData.mediaStage === 'FETCHING'
-        ) {
-            return null;
-        }
-
-        const cached = window
-            .require('WAWebMediaInMemoryBlobCache')
-            .InMemoryMediaBlobCache.get(msg.mediaObject?.filehash);
-
-        let blob;
-        if (cached) {
-            blob = cached;
-        } else if (msg.mediaObject?.mediaBlob) {
-            blob = msg.mediaObject.mediaBlob.forceToBlob();
-        }
-
-        if (!blob) return null;
-
-        return {
+        const withMeta = (blob) => ({
             blob,
             mimetype: msg.mimetype,
             filename: msg.filename,
             filesize: msg.size,
-        };
+        });
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            // Read the stage from the mediaObject directly: mediaData.mediaStage
+            // is propagated asynchronously (debounced notifyMsgsAsync) and can
+            // be stale right after downloadMedia() resolves.
+            const stage = msg.mediaObject?.downloadStage;
+
+            // Unsupported media is a hard failure - retrying cannot help.
+            if (stage === DownloadStage.ERROR_UNSUPPORTED) return null;
+
+            // A reupload/download is already in flight (download button is
+            // spinning). Give it a moment to settle rather than fighting it.
+            if (stage === DownloadStage.REUPLOADING) {
+                await sleep(1500);
+            }
+
+            // Reset dead-end stages so the next downloadMedia() actually runs
+            // and re-issues an RMR instead of no-op'ing.
+            if (
+                attempt > 0 &&
+                (stage === DownloadStage.ERROR_MISSING ||
+                    stage === DownloadStage.NEED_POKE) &&
+                msg.mediaObject
+            ) {
+                msg.mediaObject.clearBlob({ reset: true });
+            }
+
+            let timer;
+            try {
+                const timeout = new Promise((_, reject) => {
+                    timer = setTimeout(
+                        () => reject(new Error('media-download-timeout')),
+                        attemptTimeoutMs,
+                    );
+                });
+                await Promise.race([
+                    msg.downloadMedia({
+                        downloadEvenIfExpensive: true,
+                        rmrReason: 1,
+                        isUserInitiated: true,
+                    }),
+                    timeout,
+                ]);
+            } catch (ignoredError) {
+                // Timeout or unexpected throw: cancel any in-flight download so
+                // it does not linger, then fall through to the fallback / retry.
+                try {
+                    window
+                        .require('WAWebMediaMmsV4Download')
+                        .cancelDownloadMedia(msg.mediaObject);
+                } catch (ignored) {
+                    /* no-op */
+                }
+            } finally {
+                clearTimeout(timer);
+            }
+
+            // Got the bytes from WA's caches - done.
+            const resolved = window.WWebJS.getResolvedMediaBlob(msg);
+            if (resolved) return withMeta(resolved);
+
+            // State machine could not produce a blob: try a direct CDN download.
+            const direct = await window.WWebJS.directDownloadMedia(msg);
+            if (direct) return withMeta(direct);
+
+            // Brief backoff before the next attempt to let an asynchronous
+            // phone re-upload (which resets ERROR_MISSING -> INIT) land.
+            if (attempt < maxAttempts - 1) await sleep(1000 * (attempt + 1));
+        }
+
+        return null;
     };
 
     window.WWebJS.arrayBufferToBase64 = (arrayBuffer) => {
