@@ -1284,7 +1284,7 @@ exports.LoadUtils = () => {
                     window
                         .require('WAWebMediaMmsV4Download')
                         .cancelDownloadMedia(msg.mediaObject);
-                } catch (ignored) {
+                } catch (ignoredError) {
                     /* no-op */
                 }
             } finally {
