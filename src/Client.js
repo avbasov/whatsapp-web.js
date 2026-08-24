@@ -258,6 +258,16 @@ class Client extends EventEmitter {
                             .require('WAWebConnModel')
                             .Conn.on('change:ref', onRefChange); // future QR changes
 
+                        // The synced handler subscribes too late for a scan.
+                        const { Stream, StreamMode } =
+                            window.require('WAWebStreamModel');
+                        const onScanned = () => {
+                            if (Stream.mode !== StreamMode.SYNCING) return;
+                            Stream.off('change:mode', onScanned);
+                            window.onConnectionStateEvent?.('LOADING', 0);
+                        };
+                        Stream.on('change:mode', onScanned);
+
                         // Remove QR listener once authentication succeeds
                         window
                             .require('WAWebSocketModel')
