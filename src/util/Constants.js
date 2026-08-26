@@ -7,7 +7,10 @@ exports.DefaultOptions = {
         headless: true,
         defaultViewport: null,
     },
-    webVersion: '2.3000.1017054665',
+    // No version is pinned by default: a hardcoded version can never resolve on
+    // a machine that has no snapshot of it, and the resulting cache miss is
+    // silent. Set webVersion explicitly to pin.
+    webVersion: undefined,
     webVersionCache: {
         type: 'local',
     },

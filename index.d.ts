@@ -17,6 +17,13 @@ declare namespace WAWebJS {
         /** Puppeteer browser running WhatsApp Web */
         pupBrowser?: puppeteer.Browser;
 
+        /**
+         * The WhatsApp Web version this client is running, cached at inject time.
+         * Readable synchronously and survives the page going away, unlike
+         * getWWebVersion(). Null until the client has injected.
+         */
+        wwebVersion: string | null;
+
         /** Client interactivity interface */
         interface?: InterfaceController;
 
@@ -714,7 +721,12 @@ declare namespace WAWebJS {
             puppeteer.ConnectOptions;
         /** Determines how to save and restore sessions. Will use LegacySessionAuth if options.session is set. Otherwise, NoAuth will be used. */
         authStrategy?: AuthStrategy;
-        /** The version of WhatsApp Web to use. Use options.webVersionCache to configure how the version is retrieved. */
+        /**
+         * Pin a specific version of WhatsApp Web. Use options.webVersionCache to
+         * configure how that version is retrieved. Left unset, the client runs
+         * whatever version WhatsApp serves and the cache is bypassed entirely.
+         * @default undefined
+         */
         webVersion?: string;
         /**  Determines how to retrieve the WhatsApp Web version specified in options.webVersion. */
         webVersionCache?: WebCacheOptions;

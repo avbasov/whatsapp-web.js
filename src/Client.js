@@ -103,6 +103,10 @@ class Client extends EventEmitter {
 
         this.currentIndexHtml = null;
         this.lastLoggedOut = false;
+        /**
+         * @type {?string}
+         */
+        this.wwebVersion = null;
 
         Util.setFfmpegPath(this.options.ffmpegPath);
     }
@@ -135,6 +139,14 @@ class Client extends EventEmitter {
             );
             const pairWithPhoneNumber = this.options.pairWithPhoneNumber;
             const version = await this.getWWebVersion();
+            /**
+             * The WhatsApp Web version this client is running, cached from the
+             * page at inject time. Unlike getWWebVersion() this is readable
+             * synchronously and survives the page going away, so callers can
+             * report the version of a session that is restarting or dead.
+             * @type {?string}
+             */
+            this.wwebVersion = version;
 
             const needAuthHandle = await this.pupPage.waitForFunction(
                 () => {
@@ -1360,6 +1372,14 @@ class Client extends EventEmitter {
     }
 
     async initWebVersionCache() {
+        const requestedVersion = this.options.webVersion;
+
+        // Nothing pinned: load whatever WhatsApp serves and skip the cache
+        // entirely. Recording index.html here would write a file keyed by the
+        // live version that resolve() is never asked for, growing on disk once
+        // per WhatsApp release for no benefit.
+        if (!requestedVersion) return;
+
         const { type: webCacheType, ...webCacheOptions } =
             this.options.webVersionCache;
         const webCache = WebCacheFactory.createWebCache(
@@ -1367,7 +1387,6 @@ class Client extends EventEmitter {
             webCacheOptions,
         );
 
-        const requestedVersion = this.options.webVersion;
         const versionContent = await webCache.resolve(requestedVersion);
 
         if (versionContent) {
@@ -1384,6 +1403,15 @@ class Client extends EventEmitter {
                 }
             });
         } else {
+            // A pin was requested and could not be resolved. Non-strict caches
+            // fall through to whatever WhatsApp serves, so say so loudly rather
+            // than letting the client run an unintended version in silence.
+            console.warn(
+                `whatsapp-web.js: could not resolve pinned WhatsApp Web version ${requestedVersion} ` +
+                    `from the '${webCacheType}' cache; falling back to the version WhatsApp serves. ` +
+                    'Set webVersionCache.strict to fail instead of falling back.',
+            );
+
             this.pupPage.on('response', async (res) => {
                 if (res.ok() && res.url() === WhatsWebURL) {
                     const indexHtml = await res.text();
