@@ -809,7 +809,9 @@ exports.LoadUtils = () => {
      * bare fingerprint, because callers pass both. Looks in the chat's loaded
      * message window first, then falls back to the collection and the message
      * DB the way Client.getMessageById does, rejecting any hit that belongs to
-     * a different chat.
+     * a different chat. A bare fingerprint is lifted into a MsgKey per
+     * `fromMe` value so it resolves from the DB too, without paging back
+     * through the whole conversation.
      * @param {Object} chat The chat model (not the serialized model)
      * @param {string} chatId Serialized id of that chat
      * @param {string} messageId Serialized MsgKey or bare fingerprint
@@ -824,22 +826,34 @@ exports.LoadUtils = () => {
         if (loaded) return loaded;
 
         // A bare fingerprint is not a valid MsgKey, so the collection and the
-        // message DB cannot be queried with it.
-        if (!messageId.includes('_')) return null;
+        // message DB cannot be queried with it directly. Either `fromMe` value
+        // yields a valid 3-part key for this chat, so try both rather than
+        // walking the whole history backwards looking for the message.
+        const candidates = messageId.includes('_')
+            ? [messageId]
+            : [`true_${chatId}_${messageId}`, `false_${chatId}_${messageId}`];
 
         const { Msg } = window.require('WAWebCollections');
-        const found =
-            Msg.get(messageId) ||
-            (await Msg.getMessagesById([messageId]))?.messages?.[0];
-        if (!found) return null;
 
         // Guard against returning another chat's message.
-        const remote = found.id.remote;
-        const remoteId =
-            typeof remote === 'object'
-                ? remote._serialized || remote.$1
-                : remote;
-        return String(remoteId) === chatId ? found : null;
+        const isInChat = (msg) => {
+            if (!msg) return false;
+            const remote = msg.id.remote;
+            const remoteId =
+                typeof remote === 'object'
+                    ? remote._serialized || remote.$1
+                    : remote;
+            return String(remoteId) === chatId;
+        };
+
+        for (const key of candidates) {
+            const found =
+                Msg.get(key) ||
+                (await Msg.getMessagesById([key]))?.messages?.[0];
+            if (isInChat(found)) return found;
+        }
+
+        return null;
     };
 
     window.WWebJS.getMessageModel = (message) => {
@@ -1009,8 +1023,32 @@ exports.LoadUtils = () => {
         };
     };
 
-    window.WWebJS.getChats = async () => {
-        const chats = window.require('WAWebCollections').Chat.getModelsArray();
+    window.WWebJS.getChats = async (searchOptions = {}) => {
+        const chatFilter = (c) => {
+            if (searchOptions.unread === true && c.unreadCount === 0) {
+                return false;
+            }
+            if (
+                searchOptions.since !== undefined &&
+                Number.isFinite(searchOptions.since)
+            ) {
+                // A chat with no usable timestamp cannot be shown to be within
+                // the window, so treat it as outside it.
+                if (
+                    !c.t ||
+                    !Number.isFinite(c.t) ||
+                    c.t < searchOptions.since
+                ) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        const chats = window
+            .require('WAWebCollections')
+            .Chat.getModelsArray()
+            .filter(chatFilter);
         const chatPromises = chats.map((chat) =>
             window.WWebJS.getChatModel(chat),
         );

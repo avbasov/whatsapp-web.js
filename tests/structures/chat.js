@@ -71,6 +71,117 @@ describe('Chat', function () {
         expect(messages).to.have.lengthOf(0);
     });
 
+    describe('fetchMessages by id', function () {
+        let target;
+
+        before(async function () {
+            this.timeout(10000);
+            await helper.sleep(1000);
+            target = await chat.sendMessage('fetch me by id');
+            await helper.sleep(500);
+        });
+
+        it('resolves a message by its serialized id', async function () {
+            const messages = await chat.fetchMessages({
+                messageId: target.id._serialized,
+                limit: 1,
+            });
+            expect(messages).to.have.lengthOf(1);
+            expect(messages[0]).to.be.instanceOf(Message);
+            expect(messages[0].id._serialized).to.equal(target.id._serialized);
+            expect(messages[0].body).to.equal('fetch me by id');
+        });
+
+        it('resolves a message by its bare fingerprint', async function () {
+            const messages = await chat.fetchMessages({
+                messageId: target.id.id,
+                limit: 1,
+            });
+            expect(messages).to.have.lengthOf(1);
+            expect(messages[0].id._serialized).to.equal(target.id._serialized);
+        });
+
+        it('resolves a message that is outside the loaded window', async function () {
+            this.timeout(20000);
+
+            // Push the target out of the default message window, so the id has
+            // to be resolved through the message DB rather than found in the
+            // already-loaded models.
+            for (let i = 0; i < 3; i++) {
+                await chat.sendMessage(`filler ${i}`);
+                await helper.sleep(300);
+            }
+
+            // A fresh chat model starts with an unpolluted message window.
+            const refreshed = await client.getChatById(remoteId);
+            const messages = await refreshed.fetchMessages({
+                messageId: target.id.id,
+                limit: 1,
+            });
+            expect(messages).to.have.lengthOf(1);
+            expect(messages[0].id._serialized).to.equal(target.id._serialized);
+        });
+
+        it('ignores limit when a messageId is given', async function () {
+            const messages = await chat.fetchMessages({
+                messageId: target.id._serialized,
+                limit: 50,
+            });
+            expect(messages).to.have.lengthOf(1);
+        });
+
+        it('returns an empty array for an unknown id', async function () {
+            const messages = await chat.fetchMessages({
+                messageId: 'ABCDEF0123456789NOPE',
+                limit: 1,
+            });
+            expect(messages).to.have.lengthOf(0);
+        });
+
+        it("returns an empty array for another chat's message", async function () {
+            let otherChat;
+            try {
+                otherChat = await client.getChatById(
+                    client.info.wid._serialized,
+                );
+            } catch {
+                this.skip();
+            }
+            if (!otherChat || otherChat.id._serialized === remoteId) {
+                this.skip();
+            }
+
+            const messages = await otherChat.fetchMessages({
+                messageId: target.id._serialized,
+                limit: 1,
+            });
+            expect(messages).to.have.lengthOf(0);
+        });
+    });
+
+    describe('fetchMessages since', function () {
+        it('returns messages at or after the given timestamp', async function () {
+            const since = Math.floor(Date.now() / 1000) - 5;
+            await helper.sleep(1000);
+            const msg = await chat.sendMessage('recent enough');
+            await helper.sleep(500);
+
+            const messages = await chat.fetchMessages({ since });
+            expect(messages.length).to.be.greaterThanOrEqual(1);
+            expect(
+                messages.some((m) => m.id._serialized === msg.id._serialized),
+            ).to.equal(true);
+            expect(messages.every((m) => m.timestamp >= since)).to.equal(true);
+        });
+
+        it('returns an empty array for a future timestamp', async function () {
+            const messages = await chat.fetchMessages({
+                since: Math.floor(Date.now() / 1000) + 3600,
+            });
+            expect(messages).to.have.lengthOf(0);
+        });
+    });
+
     it('can get the related contact', async function () {
         const contact = await chat.getContact();
         expect(contact).to.be.instanceOf(Contact);

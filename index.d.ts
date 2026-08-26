@@ -104,7 +104,7 @@ declare namespace WAWebJS {
         getChannelByInviteCode(inviteCode: string): Promise<Channel>;
 
         /** Get all current chat instances */
-        getChats(): Promise<Chat[]>;
+        getChats(searchOptions?: ChatSearchOptions): Promise<Chat[]>;
 
         /** Gets all cached {@link Channel} instances */
         getChannels(): Promise<Channel[]>;
@@ -2099,6 +2099,16 @@ declare namespace WAWebJS {
         extra?: any;
     }
 
+    export interface ChatSearchOptions {
+        /** Return only chats with at least one unread message. */
+        unread?: boolean;
+        /**
+         * Return only chats whose last activity is at or after this unix
+         * timestamp, in seconds.
+         */
+        since?: number;
+    }
+
     export interface MessageSearchOptions {
         /**
          * The amount of messages to return. If no limit is specified, the available messages will be returned.
@@ -2117,6 +2127,11 @@ declare namespace WAWebJS {
          * an unknown id yields an empty array.
          */
         messageId?: string;
+        /**
+         * Return only messages sent at or after this unix timestamp, in seconds.
+         * To get all messages, leave the option undefined.
+         */
+        since?: number;
     }
 
     /**

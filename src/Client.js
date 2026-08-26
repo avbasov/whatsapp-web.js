@@ -1788,12 +1788,15 @@ class Client extends EventEmitter {
 
     /**
      * Get all current chat instances
+     * @param {Object} [searchOptions] Options for filtering the chats returned.
+     * @param {Boolean} [searchOptions.unread] Return only chats with at least one unread message.
+     * @param {Number} [searchOptions.since] Return only chats whose last activity is at or after this unix timestamp, in seconds.
      * @returns {Promise<Array<Chat>>}
      */
-    async getChats() {
-        const chats = await this.pupPage.evaluate(async () => {
-            return await window.WWebJS.getChats();
-        });
+    async getChats(searchOptions = {}) {
+        const chats = await this.pupPage.evaluate(async (searchOptions) => {
+            return await window.WWebJS.getChats(searchOptions);
+        }, searchOptions);
 
         return chats.map((chat) => ChatFactory.create(this, chat));
     }
