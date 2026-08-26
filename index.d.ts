@@ -1199,6 +1199,17 @@ declare namespace WAWebJS {
         fromMe: boolean;
         /** Indicates if the message has media available for download */
         hasMedia: boolean;
+        /**
+         * ID of the album this message belongs to, when several photos/videos
+         * were sent together. `null` when the message is not part of an album.
+         */
+        albumParentId: string | null;
+        /** Indicates whether this message is one of the photos/videos inside an album */
+        isAlbumChild: boolean;
+        /** Number of photos the album contains. Only set on the album parent message */
+        expectedImageCount: number | null;
+        /** Number of videos the album contains. Only set on the album parent message */
+        expectedVideoCount: number | null;
         /** Indicates if the message was sent as a reply to another message */
         hasQuotedMsg: boolean;
         /** Indicates whether there are reactions to the message */
@@ -1306,7 +1317,9 @@ declare namespace WAWebJS {
         /** Deletes the message from the chat */
         delete: (everyone?: boolean, clearMedia?: boolean) => Promise<void>;
         /** Downloads and returns the attached message media */
-        downloadMedia: () => Promise<MessageMedia | undefined>;
+        downloadMedia: (
+            options?: MediaDownloadOptions,
+        ) => Promise<MessageMedia | undefined>;
         /** Downloads the attached message media as a Node.js Readable stream */
         downloadMediaStream: (
             options?: MediaStreamOptions,
@@ -1662,8 +1675,16 @@ declare namespace WAWebJS {
         ) => Promise<MessageMedia>;
     }
 
+    /** Options for downloadMedia */
+    export interface MediaDownloadOptions {
+        /** How many times to ask WhatsApp for the media before giving up (default 2) */
+        maxAttempts?: number;
+        /** Time budget for a single attempt, in ms (default 30000) */
+        attemptTimeoutMs?: number;
+    }
+
     /** Options for downloadMediaStream */
-    export interface MediaStreamOptions {
+    export interface MediaStreamOptions extends MediaDownloadOptions {
         /** Size in bytes of each chunk read from the browser (default 10MB) */
         chunkSize?: number;
     }
@@ -2089,6 +2110,13 @@ declare namespace WAWebJS {
          * Return only messages from the bot number or vise versa. To get all messages, leave the option undefined.
          */
         fromMe?: boolean;
+        /**
+         * Return only the message with this id. Accepts a serialized MsgKey
+         * (`false_<chat>_<fingerprint>`) or the bare fingerprint.
+         * When set, `limit` is ignored and at most one message is returned;
+         * an unknown id yields an empty array.
+         */
+        messageId?: string;
     }
 
     /**

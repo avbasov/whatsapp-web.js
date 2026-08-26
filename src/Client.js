@@ -400,10 +400,25 @@ class Client extends EventEmitter {
                                 StreamMode: M,
                                 StreamInfo: I,
                             } = window.require('WAWebStreamModel');
+                            // `displayInfo` used to be a derived prop on the
+                            // Stream model; current builds expose it only
+                            // through WAWebStreamGetters, computed from
+                            // info/obscurity/hasSynced. Fall back to the raw
+                            // `info` field so another move can't silently
+                            // stall `ready` again.
+                            let displayInfo;
+                            try {
+                                const { getDisplayInfo } =
+                                    window.require('WAWebStreamGetters');
+                                displayInfo = () => getDisplayInfo(Stream);
+                            } catch {
+                                displayInfo = () =>
+                                    Stream.displayInfo ?? Stream.info;
+                            }
                             const resolveScreen = () => {
                                 switch (Stream.mode) {
                                     case M.MAIN:
-                                        return Stream.displayInfo === I.NORMAL
+                                        return displayInfo() === I.NORMAL
                                             ? 'CONNECTED'
                                             : 'LOADING';
                                     case M.QR:
@@ -428,7 +443,10 @@ class Client extends EventEmitter {
                                         .OfflineMessageHandler.getOfflineDeliveryProgress(),
                                 );
                             };
-                            Stream.on('change:mode change:displayInfo', notify);
+                            Stream.on(
+                                'change:mode change:info change:obscurity change:hasSynced',
+                                notify,
+                            );
                             notify();
                         });
                     }
@@ -1860,8 +1878,10 @@ class Client extends EventEmitter {
             let msg = window.require('WAWebCollections').Msg.get(messageId);
             if (msg) return window.WWebJS.getMessageModel(msg);
 
+            // MsgKey serializes as fromMe_remote_id[_self][_participant], so a
+            // valid key has 3 to 5 parts (see WAWebParseMsgKeyString).
             const params = messageId.split('_');
-            if (params.length !== 3 && params.length !== 4)
+            if (params.length < 3 || params.length > 5)
                 throw new Error('Invalid serialized message id specified');
 
             let messagesObject = await window

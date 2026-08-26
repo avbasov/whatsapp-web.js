@@ -49,7 +49,10 @@ class Message extends Base {
          * Indicates if the message has media available for download
          * @type {boolean}
          */
-        this.hasMedia = Boolean(data.directPath);
+        // `__hasMedia` comes from WhatsApp's own typeIsMms predicate; the
+        // directPath check is only a fallback, and it misses media served from
+        // a staticUrl.
+        this.hasMedia = data.__hasMedia ?? Boolean(data.directPath);
 
         /**
          * Message content
@@ -264,6 +267,40 @@ class Message extends Base {
          * @type {boolean}
          */
         this.isEphemeral = data.isEphemeral;
+
+        /**
+         * Indicates whether this message is one of the photos/videos inside an
+         * album rather than a standalone media message.
+         * @type {boolean}
+         */
+        this.isAlbumChild = data.associationType === 'MEDIA_ALBUM';
+
+        /**
+         * ID of the album this message belongs to, when several photos/videos
+         * were sent together. The album parent itself is a separate message of
+         * type `album` that carries no media of its own.
+         * `null` when the message is not part of an album. Note that
+         * `parentMsgKey` is also used for other kinds of associated messages,
+         * so it is only surfaced here for actual album children.
+         * @type {?string}
+         */
+        this.albumParentId = this.isAlbumChild
+            ? (data.parentMsgKey?._serialized ?? null)
+            : null;
+
+        /**
+         * Number of photos the sender said the album contains. Only set on the
+         * album parent message.
+         * @type {?number}
+         */
+        this.expectedImageCount = data.expectedImageCount ?? null;
+
+        /**
+         * Number of videos the sender said the album contains. Only set on the
+         * album parent message.
+         * @type {?number}
+         */
+        this.expectedVideoCount = data.expectedVideoCount ?? null;
 
         /** Title */
         if (data.title) {
@@ -511,25 +548,35 @@ class Message extends Base {
 
     /**
      * Downloads and returns the attached message media
+     * @param {Object} [options]
+     * @param {number} [options.maxAttempts=2] How many times to ask WhatsApp for the media before giving up
+     * @param {number} [options.attemptTimeoutMs=30000] Time budget for a single attempt, in ms
      * @returns {Promise<MessageMedia|undefined>}
      */
-    async downloadMedia() {
+    async downloadMedia({ maxAttempts, attemptTimeoutMs } = {}) {
         if (!this.hasMedia) return undefined;
 
-        const result = await this.client.pupPage.evaluate(async (msgId) => {
-            const resolved = await window.WWebJS.resolveMediaBlob(msgId);
-            if (!resolved) return null;
+        const result = await this.client.pupPage.evaluate(
+            async (msgId, options) => {
+                const resolved = await window.WWebJS.resolveMediaBlob(
+                    msgId,
+                    options,
+                );
+                if (!resolved) return null;
 
-            const data = await window.WWebJS.arrayBufferToBase64Async(
-                await resolved.blob.arrayBuffer(),
-            );
-            return {
-                data,
-                mimetype: resolved.mimetype,
-                filename: resolved.filename,
-                filesize: resolved.filesize,
-            };
-        }, this.id._serialized);
+                const data = await window.WWebJS.arrayBufferToBase64Async(
+                    await resolved.blob.arrayBuffer(),
+                );
+                return {
+                    data,
+                    mimetype: resolved.mimetype,
+                    filename: resolved.filename,
+                    filesize: resolved.filesize,
+                };
+            },
+            this.id._serialized,
+            { maxAttempts, attemptTimeoutMs },
+        );
 
         if (!result) return undefined;
         return new MessageMedia(
@@ -544,24 +591,35 @@ class Message extends Base {
      * Like downloadMedia(), but returns a Readable stream instead of loading the entire file into memory.
      * @param {Object} [options]
      * @param {number} [options.chunkSize=10485760] Size in bytes of each chunk read from the browser (default 10MB)
+     * @param {number} [options.maxAttempts=2] How many times to ask WhatsApp for the media before giving up
+     * @param {number} [options.attemptTimeoutMs=30000] Time budget for a single attempt, in ms
      * @returns {Promise<MessageMediaStream|undefined>} undefined if media is unavailable
      */
-    async downloadMediaStream({ chunkSize = 10 * 1024 * 1024 } = {}) {
+    async downloadMediaStream({
+        chunkSize = 10 * 1024 * 1024,
+        maxAttempts,
+        attemptTimeoutMs,
+    } = {}) {
         if (!this.hasMedia) return undefined;
 
         const blobHandle = await this.client.pupPage.evaluateHandle(
-            async (msgId) => {
-                const result = await window.WWebJS.resolveMediaBlob(msgId);
+            async (msgId, options) => {
+                const result = await window.WWebJS.resolveMediaBlob(
+                    msgId,
+                    options,
+                );
                 return result?.blob ?? null;
             },
             this.id._serialized,
+            { maxAttempts, attemptTimeoutMs },
         );
 
         let metadata;
         try {
             metadata = await blobHandle.evaluate((blob, msgId) => {
                 if (!blob) return null;
-                const msg = window.require('WAWebCollections').Msg.get(msgId);
+                const { Msg } = window.require('WAWebCollections');
+                const msg = Msg.get(msgId);
                 return {
                     blobSize: blob.size,
                     mimetype: msg?.mimetype,
@@ -986,7 +1044,7 @@ class Message extends Base {
                     .sendEventEditMessage(eventOptions, msg);
                 const editedMsg = window
                     .require('WAWebCollections')
-                    .Msg.get(msg.id._serialized);
+                    .Msg.get(msg.id._serialized || msg.id.$1);
                 return editedMsg?.serialize();
             },
             this.id._serialized,

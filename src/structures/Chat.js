@@ -195,9 +195,10 @@ class Chat extends Base {
 
     /**
      * Loads chat messages, sorted from earliest to latest.
-     * @param {Object} searchOptions Options for searching messages. Right now only limit and fromMe is supported.
+     * @param {Object} searchOptions Options for searching messages.
      * @param {Number} [searchOptions.limit] The amount of messages to return. If no limit is specified, the available messages will be returned. Note that the actual number of returned messages may be smaller if there aren't enough messages in the conversation. Set this to Infinity to load all messages.
      * @param {Boolean} [searchOptions.fromMe] Return only messages from the bot number or vise versa. To get all messages, leave the option undefined.
+     * @param {String} [searchOptions.messageId] Return only the message with this id. Accepts a serialized MsgKey (`false_<chat>_<fingerprint>`) or the bare fingerprint. When set, `limit` is ignored and at most one message is returned; an unknown id yields an empty array.
      * @returns {Promise<Array<Message>>}
      */
     async fetchMessages(searchOptions) {
@@ -220,6 +221,22 @@ class Chat extends Base {
                 const chat = await window.WWebJS.getChat(chatId, {
                     getAsModel: false,
                 });
+
+                // Addressing a single message: `limit` cannot find it, and
+                // silently falling through to "newest N" hands back whatever
+                // message happens to be last - the wrong one whenever newer
+                // messages have arrived, or when several share the same `t`.
+                if (searchOptions && searchOptions.messageId) {
+                    const found = await window.WWebJS.findChatMessageById(
+                        chat,
+                        chatId,
+                        searchOptions.messageId,
+                    );
+                    return found && msgFilter(found)
+                        ? [window.WWebJS.getMessageModel(found)]
+                        : [];
+                }
+
                 let msgs = chat.msgs.getModelsArray().filter(msgFilter);
 
                 if (searchOptions && searchOptions.limit > 0) {
@@ -232,7 +249,7 @@ class Chat extends Base {
                     }
 
                     if (msgs.length > searchOptions.limit) {
-                        msgs.sort((a, b) => (a.t > b.t ? 1 : -1));
+                        msgs.sort((a, b) => a.t - b.t);
                         msgs = msgs.splice(msgs.length - searchOptions.limit);
                     }
                 }
