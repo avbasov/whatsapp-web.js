@@ -77,7 +77,9 @@ exports.LoadUtils = () => {
                 module = module[key];
             }
 
-            const originalFunction = module[funcName];
+            // Re-injection replaces the previous wrapper instead of stacking on it.
+            const originals = (module._wwjsOriginals ??= {});
+            const originalFunction = (originals[funcName] ??= module[funcName]);
             if (typeof originalFunction !== 'function') return;
 
             module[funcName] = ((...args) => {
@@ -482,6 +484,11 @@ exports.LoadUtils = () => {
             ...botOptions,
             ...extraOptions,
         };
+
+        // MediaData is a model whose private __x_id field collides with Msg's
+        // internal id field when its enumerable properties are spread above,
+        // breaking getValidatedSender() during Msg initialization.
+        delete message.__x_id;
 
         // Bot's won't reply if canonicalUrl is set (linking)
         if (botOptions) {

@@ -17,7 +17,12 @@ async function exposeFunctionIfAbsent(page, name, fn) {
     if (exist) {
         return;
     }
-    await page.exposeFunction(name, fn);
+    try {
+        await page.exposeFunction(name, fn);
+    } catch (err) {
+        // Two injects racing on one name: the check ran before the winner's binding landed.
+        if (!/already exists/.test(err.message)) throw err;
+    }
 }
 
 module.exports = { exposeFunctionIfAbsent };

@@ -332,137 +332,34 @@ class Client extends EventEmitter {
                 this.pupPage,
                 'onAppStateHasSyncedEvent',
                 async () => {
-                    const authEventPayload =
-                        await this.authStrategy.getAuthEventPayload();
-                    /**
-                     * Emitted when authentication is successful
-                     * @event Client#authenticated
-                     */
-                    this.emit(Events.AUTHENTICATED, authEventPayload);
-
-                    const injected = await this.pupPage.evaluate(async () => {
-                        return typeof window.WWebJS !== 'undefined';
-                    });
-
-                    if (!injected) {
-                        if (
-                            this.options.webVersionCache.type === 'local' &&
-                            this.currentIndexHtml
-                        ) {
-                            const { type: webCacheType, ...webCacheOptions } =
-                                this.options.webVersionCache;
-                            const webCache = WebCacheFactory.createWebCache(
-                                webCacheType,
-                                webCacheOptions,
-                            );
-
-                            await webCache.persist(
-                                this.currentIndexHtml,
-                                version,
-                            );
-                        }
-
-                        // Load util functions (serializers, helper functions)
-                        await this.pupPage.evaluate(LoadUtils);
-
-                        await this.pupPage
-                            .waitForFunction(
-                                'typeof window.WWebJS !== "undefined"',
-                                { timeout: 30000 },
-                            )
-                            .catch(() => {
-                                throw 'ready timeout';
-                            });
-
-                        /**
-                         * Current connection information
-                         * @type {ClientInfo}
-                         */
-                        this.info = new ClientInfo(
-                            this,
-                            await this.pupPage.evaluate(() => {
+                    // Serialize authentication too: wiring must not overtake an async auth payload.
+                    while (this._wiring) await this._wiring.catch(() => {});
+                    const pass = (async () => {
+                        const { first, wired } = await this.pupPage.evaluate(
+                            () => {
+                                const first = !window._wwjsAuthenticated;
+                                window._wwjsAuthenticated = true;
                                 return {
-                                    ...window
-                                        .require('WAWebConnModel')
-                                        .Conn.serialize(),
-                                    wid:
-                                        window
-                                            .require('WAWebUserPrefsMeUser')
-                                            .getMaybeMePnUser() ||
-                                        window
-                                            .require('WAWebUserPrefsMeUser')
-                                            .getMaybeMeLidUser(),
+                                    first,
+                                    wired: window.WWebJS?.wired === true,
                                 };
-                            }),
+                            },
                         );
-
-                        this.interface = new InterfaceController(this);
-
-                        await this.attachEventListeners();
-
-                        // Connection lifecycle: subscribe to WhatsApp's own
-                        // Stream model (the same signals its loading screen
-                        // renders from) now that ClientInfo exists, then fire
-                        // once for the current state. Backbone only fires on
-                        // real changes, so there is no init race, no backstop
-                        // and no manual de-dup.
-                        await this.pupPage.evaluate(() => {
-                            const {
-                                Stream,
-                                StreamMode: M,
-                                StreamInfo: I,
-                            } = window.require('WAWebStreamModel');
-                            // `displayInfo` used to be a derived prop on the
-                            // Stream model; current builds expose it only
-                            // through WAWebStreamGetters, computed from
-                            // info/obscurity/hasSynced. Fall back to the raw
-                            // `info` field so another move can't silently
-                            // stall `ready` again.
-                            let displayInfo;
-                            try {
-                                const { getDisplayInfo } =
-                                    window.require('WAWebStreamGetters');
-                                displayInfo = () => getDisplayInfo(Stream);
-                            } catch {
-                                displayInfo = () =>
-                                    Stream.displayInfo ?? Stream.info;
-                            }
-                            const resolveScreen = () => {
-                                switch (Stream.mode) {
-                                    case M.MAIN:
-                                        return displayInfo() === I.NORMAL
-                                            ? 'CONNECTED'
-                                            : 'LOADING';
-                                    case M.QR:
-                                        return 'QR';
-                                    case M.OFFLINE:
-                                        return 'DISCONNECTED';
-                                    case M.SYNCING:
-                                        return 'LOADING';
-                                    default:
-                                        return 'ERROR';
-                                }
-                            };
-                            let lastScreen = null;
-                            const notify = () => {
-                                const screen = resolveScreen();
-                                if (screen === lastScreen) return;
-                                lastScreen = screen;
-                                window.onConnectionStateEvent(
-                                    screen,
-                                    window
-                                        .require('WAWebOfflineHandler')
-                                        .OfflineMessageHandler.getOfflineDeliveryProgress(),
-                                );
-                            };
-                            Stream.on(
-                                'change:mode change:info change:obscurity change:hasSynced',
-                                notify,
-                            );
-                            notify();
-                        });
-                    }
-                    this.authStrategy.afterAuthReady();
+                        if (first) {
+                            const authEventPayload =
+                                await this.authStrategy.getAuthEventPayload();
+                            /**
+                             * Emitted when authentication is successful
+                             * @event Client#authenticated
+                             */
+                            this.emit(Events.AUTHENTICATED, authEventPayload);
+                        }
+                        if (!wired) await this._wireStore();
+                    })().finally(() => {
+                        if (this._wiring === pass) this._wiring = null;
+                    });
+                    this._wiring = pass;
+                    await pass;
                 },
             );
             await exposeFunctionIfAbsent(
@@ -483,6 +380,7 @@ class Client extends EventEmitter {
                         .catch((_) => _);
                 },
             );
+            if (abort.signal.aborted) return;
             await this.pupPage.evaluate(() => {
                 const Socket = window.require('WAWebSocketModel').Socket;
                 const Cmd = window.require('WAWebCmd').Cmd;
@@ -498,8 +396,10 @@ class Client extends EventEmitter {
                     [
                         Socket,
                         'change:hasSynced',
-                        () => {
-                            window.onAppStateHasSyncedEvent();
+                        (_Socket, hasSynced) => {
+                            // Logout unsets it too; that is not an authentication.
+                            if (hasSynced === true)
+                                window.onAppStateHasSyncedEvent();
                         },
                     ],
                     [
@@ -533,8 +433,10 @@ class Client extends EventEmitter {
                 // Atomic hasSynced check in the same synchronous block as listener registration.
                 // If hasSynced is already true, Backbone won't fire change:hasSynced (no transition).
                 // If hasSynced is false, the listener above will catch the future transition.
-                const storeInjected = typeof window.WWebJS !== 'undefined';
-                if (Socket.hasSynced === true && !storeInjected) {
+                if (
+                    Socket.hasSynced === true &&
+                    window.WWebJS?.wired !== true
+                ) {
                     window.onAppStateHasSyncedEvent();
                 }
             });
@@ -545,6 +447,134 @@ class Client extends EventEmitter {
             if (this._injectAbort === abort) {
                 this._injectAbort = null;
             }
+        }
+    }
+
+    /**
+     * Wires the page after sync; idempotent, so retries and re-injects may call it again.
+     * Private function
+     */
+    async _wireStore() {
+        try {
+            // A caller that saw the page unwired may get the pass after another finished it.
+            const wired = await this.pupPage.evaluate(
+                () => window.WWebJS?.wired === true,
+            );
+            if (wired) return;
+
+            if (
+                this.options.webVersionCache.type === 'local' &&
+                this.currentIndexHtml
+            ) {
+                const { type: webCacheType, ...webCacheOptions } =
+                    this.options.webVersionCache;
+                const webCache = WebCacheFactory.createWebCache(
+                    webCacheType,
+                    webCacheOptions,
+                );
+
+                await webCache.persist(this.currentIndexHtml, this.wwebVersion);
+            }
+
+            // Load util functions (serializers, helper functions)
+            await this.pupPage.evaluate(LoadUtils);
+
+            /**
+             * Current connection information
+             * @type {ClientInfo}
+             */
+            this.info = new ClientInfo(
+                this,
+                await this.pupPage.evaluate(() => {
+                    return {
+                        ...window.require('WAWebConnModel').Conn.serialize(),
+                        wid:
+                            window
+                                .require('WAWebUserPrefsMeUser')
+                                .getMaybeMePnUser() ||
+                            window
+                                .require('WAWebUserPrefsMeUser')
+                                .getMaybeMeLidUser(),
+                    };
+                }),
+            );
+
+            this.interface = new InterfaceController(this);
+
+            await this.attachEventListeners();
+
+            // Subscribe to the Stream model WhatsApp's loading screen renders from, then fire once for the current state.
+            await this.pupPage.evaluate(() => {
+                // Proves attachEventListeners ran in this document, not one a reload replaced.
+                if (!window._wwjsStoreListeners)
+                    throw new Error('store listeners are not attached');
+                const {
+                    Stream,
+                    StreamMode: M,
+                    StreamInfo: I,
+                } = window.require('WAWebStreamModel');
+                // `displayInfo` used to be a derived prop on the
+                // Stream model; current builds expose it only
+                // through WAWebStreamGetters, computed from
+                // info/obscurity/hasSynced. Fall back to the raw
+                // `info` field so another move can't silently
+                // stall `ready` again.
+                let displayInfo;
+                try {
+                    const { getDisplayInfo } =
+                        window.require('WAWebStreamGetters');
+                    displayInfo = () => getDisplayInfo(Stream);
+                } catch {
+                    displayInfo = () => Stream.displayInfo ?? Stream.info;
+                }
+                const resolveScreen = () => {
+                    switch (Stream.mode) {
+                        case M.MAIN:
+                            return displayInfo() === I.NORMAL
+                                ? 'CONNECTED'
+                                : 'LOADING';
+                        case M.QR:
+                            return 'QR';
+                        case M.OFFLINE:
+                            return 'DISCONNECTED';
+                        case M.SYNCING:
+                            return 'LOADING';
+                        default:
+                            return 'ERROR';
+                    }
+                };
+                // Throws until offline resume has initialised, which can be after hasSynced; 0 is its own "unknown".
+                const offlineProgress = () => {
+                    try {
+                        return window
+                            .require('WAWebOfflineHandler')
+                            .OfflineMessageHandler.getOfflineDeliveryProgress();
+                    } catch {
+                        return 0;
+                    }
+                };
+                let lastScreen = null;
+                const notify = () => {
+                    const screen = resolveScreen();
+                    if (screen === lastScreen) return;
+                    lastScreen = screen;
+                    window.onConnectionStateEvent(screen, offlineProgress());
+                };
+                const events =
+                    'change:mode change:info change:obscurity change:hasSynced';
+                window._wwjsStoreListeners.push([Stream, events, notify]);
+                Stream.on(events, notify);
+                window.WWebJS.wired = true;
+                notify();
+            });
+            this.authStrategy.afterAuthReady();
+        } catch (err) {
+            // A throw inside a puppeteer exposed function only rejects in the page.
+            console.error(
+                'whatsapp-web.js: failed to wire the store after authentication, ready will not fire:',
+                err,
+            );
+            throw err;
         }
     }
 
@@ -640,11 +670,10 @@ class Client extends EventEmitter {
                 this.lastLoggedOut = false;
             }
 
-            const storeAvailable = await this.pupPage.evaluate(() => {
-                return typeof window.WWebJS !== 'undefined';
-            });
-
-            if (!isLogout && storeAvailable) return;
+            const wired = await this.pupPage.evaluate(
+                () => window.WWebJS?.wired === true,
+            );
+            if (!isLogout && wired) return;
 
             await this.inject();
         });
@@ -1155,52 +1184,64 @@ class Client extends EventEmitter {
             const { Msg, Chat } = window.require('WAWebCollections');
             const AppState = window.require('WAWebSocketModel').Socket;
 
+            // A re-run (retry, or a pass that straddled a reload) must not stack listeners.
+            for (const [obj, event, handler] of window._wwjsStoreListeners ??
+                [])
+                obj.off(event, handler);
+            window._wwjsStoreListeners = [];
+            const on = (obj, event, handler) => {
+                window._wwjsStoreListeners.push([obj, event, handler]);
+                obj.on(event, handler);
+            };
+
             // Enable placeholder message resend (recovery for ciphertext messages)
             const gatingUtils = window.require('WAWebSyncGatingUtils');
             gatingUtils.isPlaceholderMessageResendEnabled = () => true;
 
-            Msg.on('change', (msg) => {
+            on(Msg, 'change', (msg) => {
                 window.onChangeMessageEvent(window.WWebJS.getMessageModel(msg));
             });
-            Msg.on('change:type', (msg) => {
+            on(Msg, 'change:type', (msg) => {
                 if (msg.type !== 'revoked') return;
                 window.onChangeMessageTypeEvent(
                     window.WWebJS.getMessageModel(msg),
                 );
             });
-            Msg.on('change:ack', (msg, ack) => {
+            on(Msg, 'change:ack', (msg, ack) => {
                 window.onMessageAckEvent(
                     window.WWebJS.getMessageModel(msg),
                     ack,
                 );
             });
-            Msg.on('change:isUnsentMedia', (msg, unsent) => {
+            on(Msg, 'change:isUnsentMedia', (msg, unsent) => {
                 if (msg.id.fromMe && !unsent)
                     window.onMessageMediaUploadedEvent(
                         window.WWebJS.getMessageModel(msg),
                     );
             });
-            Msg.on('remove', (msg) => {
+            on(Msg, 'remove', (msg) => {
                 if (msg.isNewMsg)
                     window.onRemoveMessageEvent(
                         window.WWebJS.getMessageModel(msg),
                     );
             });
-            Msg.on('change:body change:caption', (msg, newBody, prevBody) => {
+            on(Msg, 'change:body change:caption', (msg, newBody, prevBody) => {
                 window.onEditMessageEvent(
                     window.WWebJS.getMessageModel(msg),
                     newBody,
                     prevBody,
                 );
             });
-            AppState.on('change:state', (_AppState, state) => {
+            on(AppState, 'change:state', (_AppState, state) => {
                 window.onAppStateChangedEvent(state);
             });
-            window
-                .require('WAWebConnModel')
-                .Conn.on('change:battery', (state) => {
+            on(
+                window.require('WAWebConnModel').Conn,
+                'change:battery',
+                (state) => {
                     window.onBatteryStateChangedEvent(state);
-                });
+                },
+            );
             const WAWebCallCollection = window.require('WAWebCallCollection');
             if (
                 WAWebCallCollection &&
@@ -1210,8 +1251,9 @@ class Client extends EventEmitter {
                     (k) => WAWebCallCollection[k] instanceof Map,
                 );
                 const internalCallMap = WAWebCallCollection[mapKey];
-                const originalMapSet =
-                    internalCallMap.set.bind(internalCallMap);
+                // Wrap the true original, not a previous pass's wrapper.
+                const originalMapSet = (internalCallMap._wwjsSet ??=
+                    internalCallMap.set.bind(internalCallMap));
 
                 internalCallMap.set = function (key, value) {
                     window.onIncomingCall({
@@ -1227,12 +1269,12 @@ class Client extends EventEmitter {
                     return originalMapSet(key, value);
                 };
             }
-            Chat.on('remove', async (chat) => {
+            on(Chat, 'remove', async (chat) => {
                 window.onRemoveChatEvent(
                     await window.WWebJS.getChatModel(chat),
                 );
             });
-            Chat.on('change:archive', async (chat, currState, prevState) => {
+            on(Chat, 'change:archive', async (chat, currState, prevState) => {
                 window.onArchiveChatEvent(
                     await window.WWebJS.getChatModel(chat),
                     currState,
@@ -1258,7 +1300,7 @@ class Client extends EventEmitter {
                 }, 5000);
             }
 
-            Msg.on('add', (msg) => {
+            on(Msg, 'add', (msg) => {
                 if (!msg.isNewMsg) return;
 
                 if (msg.type !== 'ciphertext') {
@@ -1293,7 +1335,7 @@ class Client extends EventEmitter {
                     );
                 });
             });
-            Chat.on('change:unreadCount', (chat) => {
+            on(Chat, 'change:unreadCount', (chat) => {
                 window.onChatUnreadCountEvent(chat);
             });
 
