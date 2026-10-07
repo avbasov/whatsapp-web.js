@@ -221,6 +221,12 @@ declare namespace WAWebJS {
         /** Send a reaction to a specific messageId */
         sendReaction(messageId: string, reaction: string): Promise<void>;
 
+        /** Pick a list row or quick-reply button of a business message, the way WhatsApp Web does */
+        selectMessageOption(
+            messageId: string,
+            optionId: string,
+        ): Promise<Message | undefined>;
+
         /** Sends a channel admin invitation to a user, allowing them to become an admin of the channel */
         sendChannelAdminInvite(
             chatId: string,
@@ -1358,6 +1364,8 @@ declare namespace WAWebJS {
         ) => Promise<Message>;
         /** React to this message with an emoji*/
         react: (reaction: string) => Promise<void>;
+        /** Reply to this list or interactive message by picking one of its options */
+        selectOption: (optionId: string) => Promise<Message | undefined>;
         /**
          * Forwards this message to another chat (that you chatted before, otherwise it will fail)
          */

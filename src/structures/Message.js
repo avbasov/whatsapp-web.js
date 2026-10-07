@@ -521,6 +521,15 @@ class Message extends Base {
     }
 
     /**
+     * Reply to this list or interactive message by picking one of its options
+     * @param {string} optionId - The list row id or the quick-reply button id
+     * @returns {Promise<Message>} The reply that was sent
+     */
+    async selectOption(optionId) {
+        return this.client.selectMessageOption(this.id._serialized, optionId);
+    }
+
+    /**
      * Accept Group V4 Invite
      * @returns {Promise<Object>}
      */

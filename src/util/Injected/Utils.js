@@ -637,6 +637,144 @@ exports.LoadUtils = () => {
             .Msg.get(msg.id._serialized || msg.id.$1);
     };
 
+    // Builds the same reply as WA Web's list modal (WAWebSendListMsgReplyChatAction),
+    // quick-reply buttons (WAWebGetInteractiveActionsFromButtons) and legacy reply
+    // buttons (WAWebSendButtonsMsgReplyChatAction), whose actions don't hand back
+    // the message they send.
+    window.WWebJS.selectMessageOption = async (msgId, optionId) => {
+        const msg =
+            window.require('WAWebCollections').Msg.get(msgId) ||
+            (
+                await window
+                    .require('WAWebCollections')
+                    .Msg.getMessagesById([msgId])
+            )?.messages?.[0];
+        if (!msg) throw new Error('Message not found');
+        const chat = window.require('WAWebFrontendMsgGetters').getChat(msg);
+
+        let msgData;
+        let buttonIndex;
+        let replyButton;
+        if (msg.type === 'list') {
+            const row = (msg.list?.sections ?? [])
+                .flatMap((section) => section.rows ?? [])
+                .find((r) => r.rowId === optionId);
+            if (!row) throw new Error('List row not found');
+            msgData = {
+                ...(await window
+                    .require('WAWebMsgDataUtils')
+                    .genOutgoingMsgData(chat, 'list_response')),
+                kind: 'listResponse',
+                ...msg.msgContextInfo(chat.id),
+                listResponse: {
+                    listType: window.require('WAWebProtobufsE2E.pb')
+                        .Message$ListResponseMessage$ListType.SINGLE_SELECT,
+                    title: row.title,
+                    description: row.description,
+                    singleSelectReply: { selectedRowId: row.rowId },
+                },
+                body: row.description
+                    ? `${row.title}\n${row.description}`
+                    : row.title,
+            };
+        } else if (msg.type === 'interactive') {
+            const params = (msg.interactivePayload?.buttons ?? []).map(
+                (button) => {
+                    if (button.name !== 'quick_reply') return null;
+                    try {
+                        return JSON.parse(button.buttonParamsJson);
+                    } catch (ignoredError) {
+                        return null;
+                    }
+                },
+            );
+            buttonIndex = params.findIndex((p) => p?.id === optionId);
+            if (buttonIndex < 0) throw new Error('Quick reply not found');
+            const button = params[buttonIndex];
+            if (button.disabled === true) {
+                throw new Error('Quick reply was already used');
+            }
+            msgData = await window
+                .require('WAWebSendTextMsgChatAction')
+                .createTextMsgData(chat, button.display_text, {
+                    quotedMsg: msg,
+                    selectedIndex: buttonIndex,
+                    selectedId: optionId,
+                });
+            if (!msgData) throw new Error('Quick reply has no text');
+        } else if (msg.isDynamicReplyButtonsMsg) {
+            const button = (msg.dynamicReplyButtons ?? []).find(
+                (b) => b.buttonId === optionId,
+            );
+            if (!button) throw new Error('Reply button not found');
+            replyButton = msg.replyButtons?.get(optionId);
+            if (replyButton?.selected) {
+                throw new Error('Reply button was already used');
+            }
+            const displayText = button.buttonText?.displayText;
+            const me = window
+                .require('WAWebUserPrefsMeUser')
+                .getMePnUserOrThrow_DO_NOT_USE();
+            const MsgKey = window.require('WAWebMsgKey');
+            msgData = {
+                type: 'buttons_response',
+                kind: 'buttonsResponse',
+                ack: window.require('WAWebAck').ACK.CLOCK,
+                from: me,
+                id: new MsgKey({
+                    from: me,
+                    to: chat.id,
+                    id: await MsgKey.newId(),
+                    participant: undefined,
+                    selfDir: 'out',
+                }),
+                local: true,
+                isNewMsg: true,
+                t: window.require('WATimeUtils').unixTime(),
+                to: chat.id,
+                ...msg.msgContextInfo(chat.id),
+                selectedButtonId: optionId,
+                ...(window
+                    .require('WAWebHsmGatingUtils')
+                    .shouldUseLegacyButtonsResponse()
+                    ? {
+                          buttonsResponse: {
+                              selectedButtonId: optionId,
+                              selectedDisplayText: displayText,
+                              type: window.require('WAWebProtobufsE2E.pb')
+                                  .Message$ButtonsResponseMessage$Type
+                                  .DISPLAY_TEXT,
+                          },
+                      }
+                    : {}),
+                body: displayText || '',
+                viewMode: 'VISIBLE',
+            };
+        } else {
+            throw new Error(`Message type ${msg.type} has no options`);
+        }
+
+        const [msgPromise] = window
+            .require('WAWebSendMsgChatAction')
+            .addAndSendMsgToChat(chat, msgData);
+        await msgPromise;
+
+        if (replyButton) replyButton.selected = true;
+        if (buttonIndex !== undefined) {
+            try {
+                await window
+                    .require('WAWebBizInteractiveMessageQuickReplyAction')
+                    .markInteractiveButtonClicked(msg, buttonIndex);
+            } catch (ignoredError) {
+                /* the reply is out; a stale enabled button is cosmetic */
+            }
+        }
+
+        return window
+            .require('WAWebCollections')
+            .Msg.get(msgData.id._serialized || msgData.id.$1);
+    };
+
     window.WWebJS.toStickerData = async (mediaInfo) => {
         if (mediaInfo.mimetype == 'image/webp') return mediaInfo;
 

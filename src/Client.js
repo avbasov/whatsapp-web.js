@@ -1781,6 +1781,29 @@ class Client extends EventEmitter {
     }
 
     /**
+     * Pick an option of a business message the way WhatsApp Web does: a row of a
+     * list message, or a quick-reply button of an interactive message.
+     * @param {string} messageId - Id of the list or interactive message
+     * @param {string} optionId - The list row id or the quick-reply button id
+     * @returns {Promise<Message>} The reply that was sent
+     */
+    async selectMessageOption(messageId, optionId) {
+        const sentMsg = await this.pupPage.evaluate(
+            async (messageId, optionId) => {
+                const msg = await window.WWebJS.selectMessageOption(
+                    messageId,
+                    optionId,
+                );
+                return msg ? window.WWebJS.getMessageModel(msg) : undefined;
+            },
+            messageId,
+            optionId,
+        );
+
+        return sentMsg ? new Message(this, sentMsg) : undefined;
+    }
+
+    /**
      * @typedef {Object} SendChannelAdminInviteOptions
      * @property {?string} comment The comment to be added to an invitation
      */
